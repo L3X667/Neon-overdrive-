@@ -343,13 +343,39 @@ const Music = {
     src.start(t); src.stop(t+0.05);
   }
 };
-function unlockMusicOnce(){
-  Music.unlock(); Music.start();
-  document.removeEventListener('pointerdown', unlockMusicOnce);
-  document.removeEventListener('keydown', unlockMusicOnce);
+function primeAudioContext(ctx){
+  // Astuce indispensable sur iOS/Safari : jouer un buffer quasi silencieux
+  // de façon synchrone dans le geste utilisateur pour "dégeler" le hardware audio.
+  try{
+    const buffer = ctx.createBuffer(1, 1, 22050);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(ctx.destination);
+    if(src.start) src.start(0); else src.noteOn(0);
+  }catch(e){}
 }
-document.addEventListener('pointerdown', unlockMusicOnce, {once:true});
-document.addEventListener('keydown', unlockMusicOnce, {once:true});
+let audioUnlocked = false;
+function unlockMusicOnce(){
+  Music.init();
+  if(!Music.ctx) return; // Web Audio indisponible sur ce navigateur
+  primeAudioContext(Music.ctx);
+  const proceed = ()=>{
+    if(audioUnlocked) return;
+    audioUnlocked = true;
+    Music.start();
+    ['pointerdown','touchend','touchstart','click','keydown'].forEach(evt=>{
+      document.removeEventListener(evt, unlockMusicOnce);
+    });
+  };
+  if(Music.ctx.state === 'suspended'){
+    Music.ctx.resume().then(proceed).catch(()=>{});
+  } else {
+    proceed();
+  }
+}
+['pointerdown','touchend','touchstart','click','keydown'].forEach(evt=>{
+  document.addEventListener(evt, unlockMusicOnce, {passive:true});
+});
 
 /* -------------------------------------------------------------------------------------
    1. UTILITAIRES
