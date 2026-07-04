@@ -96,6 +96,12 @@
     width:42px; height:42px; border-radius:50%; background:rgba(0,0,0,0.45); border:2px solid var(--neon-cyan);
     color:#fff; font-size:1.1rem; display:flex; align-items:center; justify-content:center; pointer-events:auto; cursor:pointer;
   }
+  #muteBtn{
+    position:absolute; top:calc(10px + env(safe-area-inset-top)); left:calc(10px + env(safe-area-inset-left));
+    width:42px; height:42px; border-radius:50%; background:rgba(0,0,0,0.45); border:2px solid var(--neon-magenta);
+    color:#fff; font-size:1.1rem; display:flex; align-items:center; justify-content:center; cursor:pointer;
+    z-index:60; pointer-events:auto;
+  }
 
   /* ---------- Contrôles mobiles ---------- */
   .touch-controls{ position:absolute; inset:0; z-index:15; pointer-events:none; display:none; }
@@ -146,6 +152,8 @@
 <body>
 
 <canvas id="gameCanvas"></canvas>
+
+<button id="muteBtn" aria-label="Son">🔊</button>
 
 <!-- ============ HUD (dessiné majoritairement sur canvas, quelques boutons HTML) ============ -->
 <div id="hud">
@@ -232,6 +240,116 @@ resizeCanvas();
 // Détection tactile -> active l'UI mobile
 const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
 if (isTouch) document.body.classList.add('touch-device');
+
+/* -------------------------------------------------------------------------------------
+   0.5 MUSIQUE DE FOND — synthwave procédural généré en Web Audio (aucun fichier externe)
+   Une seule boucle tourne en continu ; seuls le volume et le filtre changent selon
+   l'ambiance (menu / combat / boss / pause / game over) pour renforcer l'immersion.
+   ------------------------------------------------------------------------------------- */
+const Music = {
+  ctx:null, master:null, filter:null, delay:null, delayGain:null,
+  playing:false, muted:false, currentMood:'menu', bossOn:false,
+  bpm:128, step:0, nextStepTime:0, schedulerId:null,
+  lookahead:25, scheduleAhead:0.15,
+  rootFreq:55, // La1 — tonalité mineure, ambiance cyber-arène
+  bassPattern:[0,0,7,7,3,3,5,5, 0,0,7,7,3,5,7,10],
+  arpPattern:[12,19,24,27,24,19,12,7, 15,22,27,31,27,22,15,10],
+
+  init(){
+    if(this.ctx) return;
+    try{ this.ctx = new (window.AudioContext||window.webkitAudioContext)(); }
+    catch(e){ return; }
+    this.master = this.ctx.createGain(); this.master.gain.value = 0;
+    this.filter = this.ctx.createBiquadFilter();
+    this.filter.type = 'lowpass'; this.filter.frequency.value = 650; this.filter.Q.value = 0.8;
+    this.delay = this.ctx.createDelay(1.0); this.delay.delayTime.value = (60/this.bpm)*0.75;
+    this.delayGain = this.ctx.createGain(); this.delayGain.gain.value = 0.22;
+    this.filter.connect(this.master);
+    this.filter.connect(this.delay); this.delay.connect(this.delayGain); this.delayGain.connect(this.master);
+    this.master.connect(this.ctx.destination);
+  },
+  unlock(){ this.init(); if(this.ctx && this.ctx.state==='suspended') this.ctx.resume(); },
+  start(){
+    this.unlock();
+    if(!this.ctx || this.playing) return;
+    this.playing = true; this.step = 0;
+    this.nextStepTime = this.ctx.currentTime + 0.1;
+    this.schedulerId = setInterval(()=>this.scheduler(), this.lookahead);
+    this.setMood(this.currentMood);
+  },
+  setMood(mood){
+    this.currentMood = mood;
+    if(!this.ctx) return;
+    const cfg = {
+      menu:{gain:0.26,cutoff:650}, combat:{gain:0.46,cutoff:1000},
+      boss:{gain:0.58,cutoff:1900}, paused:{gain:0.12,cutoff:480},
+      gameover:{gain:0.18,cutoff:420}
+    }[mood] || {gain:0.4,cutoff:800};
+    const now = this.ctx.currentTime;
+    this.master.gain.cancelScheduledValues(now);
+    this.master.gain.setValueAtTime(this.master.gain.value, now);
+    this.master.gain.linearRampToValueAtTime(this.muted?0:cfg.gain, now+0.9);
+    this.filter.frequency.cancelScheduledValues(now);
+    this.filter.frequency.setValueAtTime(this.filter.frequency.value, now);
+    this.filter.frequency.linearRampToValueAtTime(cfg.cutoff, now+0.9);
+  },
+  toggleMute(){
+    this.muted = !this.muted;
+    this.setMood(this.currentMood);
+    return this.muted;
+  },
+  scheduler(){
+    while(this.nextStepTime < this.ctx.currentTime + this.scheduleAhead){
+      this.playStep(this.step, this.nextStepTime);
+      this.nextStepTime += (60/this.bpm)/4; // double-croche
+      this.step = (this.step+1) % 16;
+    }
+  },
+  playStep(i, t){
+    if(i % 2 === 0) this.note(this.rootFreq*Math.pow(2,this.bassPattern[i]/12), t, 0.26, 'sawtooth', 0.55);
+    this.note(this.rootFreq*Math.pow(2,this.arpPattern[i]/12), t, 0.13, 'square', 0.16);
+    if(i % 4 === 0) this.kick(t);
+    if(i % 4 === 2) this.hat(t);
+    if(this.bossOn && i % 8 === 4) this.note(this.rootFreq/2, t, 0.5, 'sawtooth', 0.3);
+  },
+  note(freq, t, dur, type, gain){
+    if(!this.ctx) return;
+    const o = this.ctx.createOscillator(); const g = this.ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(gain,0.0002), t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    o.connect(g); g.connect(this.filter);
+    o.start(t); o.stop(t+dur+0.03);
+  },
+  kick(t){
+    if(!this.ctx) return;
+    const o=this.ctx.createOscillator(); const g=this.ctx.createGain();
+    o.type='sine'; o.frequency.setValueAtTime(140,t); o.frequency.exponentialRampToValueAtTime(38,t+0.14);
+    g.gain.setValueAtTime(0.7,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.16);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t+0.18);
+  },
+  hat(t){
+    if(!this.ctx) return;
+    const size = Math.floor(0.04*this.ctx.sampleRate);
+    const buffer = this.ctx.createBuffer(1, size, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for(let i=0;i<size;i++) data[i] = Math.random()*2-1;
+    const src = this.ctx.createBufferSource(); src.buffer = buffer;
+    const hp = this.ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=6500;
+    const g = this.ctx.createGain(); g.gain.setValueAtTime(0.1,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.045);
+    src.connect(hp); hp.connect(g); g.connect(this.master);
+    src.start(t); src.stop(t+0.05);
+  }
+};
+function unlockMusicOnce(){
+  Music.unlock(); Music.start();
+  document.removeEventListener('pointerdown', unlockMusicOnce);
+  document.removeEventListener('keydown', unlockMusicOnce);
+}
+document.addEventListener('pointerdown', unlockMusicOnce, {once:true});
+document.addEventListener('keydown', unlockMusicOnce, {once:true});
 
 /* -------------------------------------------------------------------------------------
    1. UTILITAIRES
@@ -798,6 +916,8 @@ class Enemy{
     if(this.isBoss){
       spawnFloatText(this.x, this.y-60, 'BOSS VAINCU !', '#f6ff2b', 26);
       Game.bossActive = false;
+      Music.bossOn = false;
+      Music.setMood('combat');
     }
   }
   update(dt){
@@ -963,6 +1083,8 @@ const Game = {
     elapsedGameTime = 0;
     this.state = 'playing';
     hideAllScreens();
+    Music.bossOn = false;
+    Music.setMood('combat');
   },
 
   onEnemyKilled(enemy){
@@ -982,12 +1104,20 @@ const Game = {
   },
 
   togglePause(){
-    if(this.state==='playing'){ this.state='paused'; document.getElementById('pauseScreen').classList.remove('hidden'); }
-    else if(this.state==='paused'){ this.state='playing'; document.getElementById('pauseScreen').classList.add('hidden'); }
+    if(this.state==='playing'){
+      this.state='paused'; document.getElementById('pauseScreen').classList.remove('hidden');
+      Music.setMood('paused');
+    }
+    else if(this.state==='paused'){
+      this.state='playing'; document.getElementById('pauseScreen').classList.add('hidden');
+      Music.setMood(Music.bossOn ? 'boss' : 'combat');
+    }
   },
 
   gameOver(){
     this.state = 'gameover';
+    Music.bossOn = false;
+    Music.setMood('gameover');
     const stats = document.getElementById('finalStats');
     stats.innerHTML = `
       <div class="final-score">SCORE : ${this.score}</div>
@@ -1052,6 +1182,8 @@ const Game = {
 
   spawnBoss(){
     this.bossActive = true;
+    Music.bossOn = true;
+    Music.setMood('boss');
     const b = new Enemy('boss');
     const a = rand(0,TAU);
     b.x = player.x + Math.cos(a)*700;
@@ -1424,11 +1556,22 @@ document.getElementById('quitBtn').addEventListener('click', ()=>{
   Game.state = 'start';
   hideAllScreens();
   document.getElementById('startScreen').classList.remove('hidden');
+  Music.bossOn = false;
+  Music.setMood('menu');
 });
 document.getElementById('restartBtn').addEventListener('click', ()=>{
   hideAllScreens();
   document.getElementById('startScreen').classList.remove('hidden');
   Game.state = 'start';
+  Music.bossOn = false;
+  Music.setMood('menu');
+});
+
+// --- Bouton son ---
+const muteBtnEl = document.getElementById('muteBtn');
+muteBtnEl.addEventListener('click', ()=>{
+  const muted = Music.toggleMute();
+  muteBtnEl.textContent = muted ? '🔇' : '🔊';
 });
 
 // Note : le zoom double-tap est déjà bloqué par touch-action:none (CSS) et
